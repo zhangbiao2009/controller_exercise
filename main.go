@@ -45,7 +45,7 @@ func main() {
 	nsInformer := factory.Core().V1().Namespaces()
 
 	// Create a rate-limiting workqueue
-	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	queue := workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]())
 
 	// Register event handlers on the informer before factory.Start()
 	nsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -84,7 +84,7 @@ func main() {
 		}
 
 		// Process the key
-		err := reconcile(clientset, nsInformer.Lister(), key.(string))
+		err := reconcile(clientset, nsInformer.Lister(), key)
 		if err != nil {
 			fmt.Printf("Error reconciling %s: %v, requeuing\n", key, err)
 			queue.AddRateLimited(key) // requeue with backoff
