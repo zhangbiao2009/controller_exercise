@@ -155,6 +155,7 @@ func (r *WebsiteReconciler) reconcileDeployment(ctx context.Context, website *si
 
 	// Update existing Deployment if spec changed
 	found.Spec.Replicas = dep.Spec.Replicas
+	found.Spec.Template = dep.Spec.Template  // Update pod template (includes git URL)
 	return r.Update(ctx, found)
 }
 
