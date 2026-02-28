@@ -91,6 +91,10 @@ func (r *WebsiteReconciler) reconcileDeployment(ctx context.Context, website *si
 
 	// Define the desired Deployment
 	dep := &appsv1.Deployment{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "apps/v1",
+			Kind:       "Deployment",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      website.Name,
 			Namespace: website.Namespace,
@@ -136,33 +140,24 @@ func (r *WebsiteReconciler) reconcileDeployment(ctx context.Context, website *si
 		},
 	}
 
-	// Set OwnerReference - THIS IS KEY FOR GARBAGE COLLECTION
+	// Set OwnerReference - for garbage collection
 	if err := ctrl.SetControllerReference(website, dep, r.Scheme); err != nil {
 		return err
 	}
 
-	// Check if Deployment exists
-	found := &appsv1.Deployment{}
-	err := r.Get(ctx, types.NamespacedName{Name: dep.Name, Namespace: dep.Namespace}, found)
-
-	if err != nil && errors.IsNotFound(err) {
-		// Create new Deployment
-		log.Info("Creating Deployment", "name", dep.Name)
-		return r.Create(ctx, dep)
-	} else if err != nil {
-		return err
-	}
-
-	// Update existing Deployment if spec changed
-	found.Spec.Replicas = dep.Spec.Replicas
-	found.Spec.Template = dep.Spec.Template  // Update pod template (includes git URL)
-	return r.Update(ctx, found)
+	// Server-Side Apply: declare ownership of our fields
+	log.Info("Applying Deployment", "name", dep.Name)
+	return r.Patch(ctx, dep, client.Apply, client.FieldOwner("website-controller"), client.ForceOwnership)
 }
 
 func (r *WebsiteReconciler) reconcileService(ctx context.Context, website *sitesv1.Website) error {
 	log := log.FromContext(ctx)
 
 	svc := &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Service",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      website.Name,
 			Namespace: website.Namespace,
@@ -177,20 +172,14 @@ func (r *WebsiteReconciler) reconcileService(ctx context.Context, website *sites
 		},
 	}
 
-	// Set OwnerReference
+	// Set OwnerReference - for garbage collection
 	if err := ctrl.SetControllerReference(website, svc, r.Scheme); err != nil {
 		return err
 	}
 
-	found := &corev1.Service{}
-	err := r.Get(ctx, types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}, found)
-
-	if err != nil && errors.IsNotFound(err) {
-		log.Info("Creating Service", "name", svc.Name)
-		return r.Create(ctx, svc)
-	}
-
-	return err
+	// Server-Side Apply
+	log.Info("Applying Service", "name", svc.Name)
+	return r.Patch(ctx, svc, client.Apply, client.FieldOwner("website-controller"), client.ForceOwnership)
 }
 
 func (r *WebsiteReconciler) updateStatus(ctx context.Context, website *sitesv1.Website) error {
@@ -201,7 +190,8 @@ func (r *WebsiteReconciler) updateStatus(ctx context.Context, website *sitesv1.W
 		return err
 	}
 
-	// Update status fields
+	// Patch status (avoids conflicts)
+	patch := client.MergeFrom(website.DeepCopy())
 	website.Status.AvailableReplicas = dep.Status.AvailableReplicas
 	if dep.Status.AvailableReplicas > 0 {
 		website.Status.Phase = "Running"
@@ -209,8 +199,7 @@ func (r *WebsiteReconciler) updateStatus(ctx context.Context, website *sitesv1.W
 		website.Status.Phase = "Pending"
 	}
 
-	// Use Status().Update() for status subresource
-	return r.Status().Update(ctx, website)
+	return r.Status().Patch(ctx, website, patch)
 }
 
 // SetupWithManager sets up the controller with the Manager.
