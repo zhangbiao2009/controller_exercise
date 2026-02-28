@@ -7,4 +7,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: simpleoperator
 repo: github.com/zhangbiao2009/controller_exercise/simpleoperator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: davidweb.com
+  group: sites
+  kind: Website
+  path: github.com/zhangbiao2009/controller_exercise/simpleoperator/api/v1
+  version: v1
 version: "3"

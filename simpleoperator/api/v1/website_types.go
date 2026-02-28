@@ -28,14 +28,27 @@ type WebsiteSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	// Foo is an example field of Website. Edit website_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// GitURL is the URL of the git repository containing static site content
+	// +kubebuilder:validation:Required
+	GitURL string `json:"gitURL"`
+
+	// Replicas is the number of nginx pods to run
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	Replicas int32 `json:"replicas,omitempty"`
 }
 
 // WebsiteStatus defines the observed state of Website
 type WebsiteStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	// Phase represents the current phase of the Website
+
+	// +kubebuilder:validation:Enum=Pending;Running;Failed
+	Phase string `json:"phase,omitempty"`
+
+	// AvailableReplicas is the number of ready pods
+	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 }
 
 //+kubebuilder:object:root=true
