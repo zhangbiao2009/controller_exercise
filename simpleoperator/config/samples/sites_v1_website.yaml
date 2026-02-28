@@ -1,0 +1,9 @@
+apiVersion: sites.davidweb.com/v1
+kind: Website
+metadata:
+  labels:
+    app.kubernetes.io/name: simpleoperator
+    app.kubernetes.io/managed-by: kustomize
+  name: website-sample
+spec:
+  # TODO(user): Add fields here
