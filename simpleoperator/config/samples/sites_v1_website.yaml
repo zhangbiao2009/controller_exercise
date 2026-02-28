@@ -6,4 +6,5 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: website-sample
 spec:
-  # TODO(user): Add fields here
+  gitURL: https://github.com/zhangbiao2009/static-site-demo.git
+  replicas: 2

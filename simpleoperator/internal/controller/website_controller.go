@@ -108,19 +108,21 @@ func (r *WebsiteReconciler) reconcileDeployment(ctx context.Context, website *si
 					InitContainers: []corev1.Container{{
 						Name:  "git-sync",
 						Image: "registry.k8s.io/git-sync/git-sync:v4.2.1",
-						Args:  []string{"--repo=" + website.Spec.GitURL, "--root=/data", "--one-time"},
+						Args:  []string{"--repo=" + website.Spec.GitURL, "--root=/git", "--link=current", "--one-time"},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "web-content",
-							MountPath: "/data",
+							MountPath: "/git",
 						}},
 					}},
 					Containers: []corev1.Container{{
-						Name:  "nginx",
-						Image: "nginx:alpine",
-						Ports: []corev1.ContainerPort{{ContainerPort: 80}},
+						Name:    "nginx",
+						Image:   "nginx:alpine",
+						Command: []string{"/bin/sh", "-c"},
+						Args:    []string{"cp -rL /git/current/* /usr/share/nginx/html/ && nginx -g 'daemon off;'"},
+						Ports:   []corev1.ContainerPort{{ContainerPort: 80}},
 						VolumeMounts: []corev1.VolumeMount{{
 							Name:      "web-content",
-							MountPath: "/usr/share/nginx/html",
+							MountPath: "/git",
 						}},
 					}},
 					Volumes: []corev1.Volume{{
