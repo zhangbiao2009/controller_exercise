@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- issues_v1_githubissue.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples

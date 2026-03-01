@@ -1,0 +1,9 @@
+apiVersion: issues.github.example.com/v1
+kind: GitHubIssue
+metadata:
+  labels:
+    app.kubernetes.io/name: githubissue-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: githubissue-sample
+spec:
+  # TODO(user): Add fields here

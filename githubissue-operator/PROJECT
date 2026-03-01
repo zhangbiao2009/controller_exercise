@@ -7,4 +7,14 @@ layout:
 - go.kubebuilder.io/v4
 projectName: githubissue-operator
 repo: github.com/zhangbiao2009/controller_exercise/githubissue-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: github.example.com
+  group: issues
+  kind: GitHubIssue
+  path: github.com/zhangbiao2009/controller_exercise/githubissue-operator/api/v1
+  version: v1
 version: "3"
