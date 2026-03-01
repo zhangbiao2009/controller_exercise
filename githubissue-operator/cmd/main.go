@@ -36,6 +36,7 @@ import (
 
 	issuesv1 "github.com/zhangbiao2009/controller_exercise/githubissue-operator/api/v1"
 	"github.com/zhangbiao2009/controller_exercise/githubissue-operator/internal/controller"
+	"github.com/zhangbiao2009/controller_exercise/githubissue-operator/pkg/providers"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -123,8 +124,9 @@ func main() {
 	}
 
 	if err = (&controller.GitHubIssueReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		IssueProvider: providers.NewGitHubProvider(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GitHubIssue")
 		os.Exit(1)
