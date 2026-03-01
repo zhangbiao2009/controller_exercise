@@ -19,6 +19,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -65,6 +66,9 @@ func main() {
 			"Enabling this will ensure there is only one active controller manager.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", false,
 		"If set the metrics endpoint is served securely")
+	var devMode bool
+	flag.BoolVar(&devMode, "dev", false,
+		"Use MockProvider instead of real GitHub API. Exposes mock state on :8082.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	opts := zap.Options{
@@ -123,10 +127,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	var issueProvider providers.IssueProvider
+	if devMode {
+		setupLog.Info("running in dev mode with MockProvider")
+		mock := providers.NewMockProvider()
+		issueProvider = mock
+
+		// Start HTTP server to inspect mock state
+		go func() {
+			addr := ":8082"
+			setupLog.Info("starting mock API server", "addr", addr)
+			setupLog.Info("  GET /issues          - list all mock issues")
+			setupLog.Info("  GET /issues?repo=x   - filter by repo")
+			setupLog.Info("  GET /stats           - provider call stats")
+			if err := http.ListenAndServe(addr, mock.Handler()); err != nil {
+				setupLog.Error(err, "mock API server failed")
+			}
+		}()
+	} else {
+		issueProvider = providers.NewGitHubProvider()
+	}
+
 	if err = (&controller.GitHubIssueReconciler{
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
-		IssueProvider: providers.NewGitHubProvider(),
+		IssueProvider: issueProvider,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "GitHubIssue")
 		os.Exit(1)

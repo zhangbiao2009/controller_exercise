@@ -18,7 +18,10 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
+	"net/http"
 	"sync"
 )
 
@@ -171,4 +174,70 @@ func (m *MockProvider) GetIssue(repo string, number int) *Issue {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.issues[issueKey(repo, number)]
+}
+
+// Handler returns an http.Handler that exposes the mock's internal state.
+//
+//	GET /issues          — list all issues
+//	GET /issues?repo=owner/repo  — list issues for a specific repo
+func (m *MockProvider) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/issues", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+
+		repoFilter := r.URL.Query().Get("repo")
+
+		type issueResponse struct {
+			Repo   string   `json:"repo"`
+			Number int      `json:"number"`
+			URL    string   `json:"url"`
+			State  string   `json:"state"`
+			Title  string   `json:"title"`
+			Body   string   `json:"body"`
+			Labels []string `json:"labels"`
+		}
+
+		var results []issueResponse
+		for key, issue := range m.issues {
+			// key is "repo#number", extract repo part
+			repo := key[:len(key)-len(fmt.Sprintf("#%d", issue.Number))]
+			if repoFilter != "" && repo != repoFilter {
+				continue
+			}
+			results = append(results, issueResponse{
+				Repo:   repo,
+				Number: issue.Number,
+				URL:    issue.URL,
+				State:  issue.State,
+				Title:  issue.Title,
+				Body:   issue.Body,
+				Labels: issue.Labels,
+			})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(results); err != nil {
+			log.Printf("mock HTTP: encode error: %v", err)
+		}
+	})
+
+	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.RLock()
+		defer m.mu.RUnlock()
+
+		stats := map[string]int{
+			"createCalled": m.CreateCalled,
+			"getCalled":    m.GetCalled,
+			"updateCalled": m.UpdateCalled,
+			"closeCalled":  m.CloseCalled,
+			"totalIssues":  len(m.issues),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(stats)
+	})
+
+	return mux
 }
