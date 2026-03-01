@@ -59,8 +59,8 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
-	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
-	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&metricsAddr, "metrics-bind-address", ":9090", "The address the metric endpoint binds to.")
+	flag.StringVar(&probeAddr, "health-probe-bind-address", ":9091", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -135,7 +135,7 @@ func main() {
 
 		// Start HTTP server to inspect mock state
 		go func() {
-			addr := ":8082"
+			addr := ":9092"
 			setupLog.Info("starting mock API server", "addr", addr)
 			setupLog.Info("  GET /issues          - list all mock issues")
 			setupLog.Info("  GET /issues?repo=x   - filter by repo")
