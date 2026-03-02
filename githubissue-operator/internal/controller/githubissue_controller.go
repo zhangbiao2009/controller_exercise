@@ -72,7 +72,10 @@ func (r *GitHubIssueReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// 3. Handle deletion
 	if !issue.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, &issue, token)
+		if err := r.handleDeletion(ctx, &issue, token); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// 4. Ensure finalizer is present before any external mutations
@@ -86,8 +89,8 @@ func (r *GitHubIssueReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			return ctrl.Result{}, err
 		}
 	} else {
-		if result, err := r.syncRemoteIssue(ctx, &issue, token); err != nil {
-			return result, err
+		if err := r.syncRemoteIssue(ctx, &issue, token); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -118,29 +121,28 @@ func (r *GitHubIssueReconciler) getToken(ctx context.Context, issue *issuesv1.Gi
 
 // handleDeletion closes the remote issue (if it exists) and removes the finalizer
 // so Kubernetes can complete the deletion.
-func (r *GitHubIssueReconciler) handleDeletion(ctx context.Context, issue *issuesv1.GitHubIssue, token string) (ctrl.Result, error) {
+func (r *GitHubIssueReconciler) handleDeletion(ctx context.Context, issue *issuesv1.GitHubIssue, token string) error {
 	logger := log.FromContext(ctx)
 
 	if !controllerutil.ContainsFinalizer(issue, githubIssueFinalizer) {
-		return ctrl.Result{}, nil
+		return nil
 	}
 
 	// Close the remote issue if it was created
 	if issue.Status.IssueNumber > 0 {
 		logger.Info("closing remote issue before deletion", "issueNumber", issue.Status.IssueNumber)
 		if err := r.IssueProvider.Close(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
-			logger.Error(err, "failed to close remote issue")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return fmt.Errorf("failed to close remote issue: %w", err)
 		}
 	}
 
 	// Remove finalizer to unblock deletion
 	controllerutil.RemoveFinalizer(issue, githubIssueFinalizer)
 	if err := r.Update(ctx, issue); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+		return fmt.Errorf("failed to remove finalizer: %w", err)
 	}
 	logger.Info("finalizer removed, CR can be deleted")
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // ensureFinalizer adds the cleanup finalizer if it is not already present.
@@ -185,21 +187,20 @@ func (r *GitHubIssueReconciler) createRemoteIssue(ctx context.Context, issue *is
 
 // syncRemoteIssue enforces the desired state (spec) onto the existing GitHub issue.
 // It reopens the issue if closed externally and pushes any title/body/labels drift.
-func (r *GitHubIssueReconciler) syncRemoteIssue(ctx context.Context, issue *issuesv1.GitHubIssue, token string) (ctrl.Result, error) {
+func (r *GitHubIssueReconciler) syncRemoteIssue(ctx context.Context, issue *issuesv1.GitHubIssue, token string) error {
 	logger := log.FromContext(ctx)
 	logger.Info("syncing remote issue", "issueNumber", issue.Status.IssueNumber)
 
 	current, err := r.IssueProvider.Get(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get remote issue: %w", err)
+		return fmt.Errorf("failed to get remote issue: %w", err)
 	}
 
 	// Reopen if someone closed it on GitHub
 	if current.State == "closed" {
 		logger.Info("reopening externally-closed issue", "issueNumber", issue.Status.IssueNumber)
 		if err := r.IssueProvider.Reopen(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
-			logger.Error(err, "failed to reopen remote issue")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return fmt.Errorf("failed to reopen remote issue: %w", err)
 		}
 		current.State = "open"
 	}
@@ -212,8 +213,7 @@ func (r *GitHubIssueReconciler) syncRemoteIssue(ctx context.Context, issue *issu
 			Body:   issue.Spec.Body,
 			Labels: issue.Spec.Labels,
 		}); err != nil {
-			logger.Error(err, "failed to update remote issue")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			return fmt.Errorf("failed to update remote issue: %w", err)
 		}
 		logger.Info("remote issue updated")
 	}
@@ -222,10 +222,10 @@ func (r *GitHubIssueReconciler) syncRemoteIssue(ctx context.Context, issue *issu
 	if issue.Status.State != current.State {
 		issue.Status.State = current.State
 		if err := r.Status().Update(ctx, issue); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update status after sync: %w", err)
+			return fmt.Errorf("failed to update status after sync: %w", err)
 		}
 	}
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // specDrifted reports whether the remote issue differs from the desired spec.
