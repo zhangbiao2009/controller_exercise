@@ -6,8 +6,8 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: githubissue-sample
 spec:
-  repo: "biao/demorepo"
-  title: "Updated Issue Title from Kubernetes"
+  repo: "zhangbiao2009/controller_exercise"
+  title: "the fourth issue"
   body: "This issue was created by the GitHubIssue operator."
   labels:
     - bug

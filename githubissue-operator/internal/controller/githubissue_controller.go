@@ -50,164 +50,189 @@ type GitHubIssueReconciler struct {
 //+kubebuilder:rbac:groups=issues.github.example.com,resources=githubissues/finalizers,verbs=update
 //+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the GitHubIssue object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.17.2/pkg/reconcile
+// Reconcile ensures the remote GitHub issue matches the desired state in the GitHubIssue CR.
 func (r *GitHubIssueReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch the GitHubIssue instance
+	// 1. Fetch the GitHubIssue instance
 	var issue issuesv1.GitHubIssue
 	if err := r.Get(ctx, req.NamespacedName, &issue); err != nil {
 		if apierrors.IsNotFound(err) {
-			// Object not found, return. Created objects are automatically garbage collected.
-			// For additional cleanup logic use finalizers.
 			logger.Info("GitHubIssue resource not found. Ignoring since object must be deleted.")
 			return ctrl.Result{}, nil
 		}
-		logger.Error(err, "unable to fetch GitHubIssue")
 		return ctrl.Result{}, err
 	}
 
-	// 2. Get GitHub token from Secret
-	var secret corev1.Secret
-	secretKey := types.NamespacedName{
-		Name:      issue.Spec.TokenSecretRef,
-		Namespace: issue.Namespace, // Assuming the secret is in the same namespace as the GitHubIssue
+	// 2. Get GitHub token (needed for all provider operations, including deletion cleanup)
+	token, err := r.getToken(ctx, &issue)
+	if err != nil {
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, err
 	}
-	if err := r.Get(ctx, secretKey, &secret); err != nil {
-		logger.Error(err, "unable to fetch Secret for GitHub token")
-		return ctrl.Result{}, err
+
+	// 3. Handle deletion
+	if !issue.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, &issue, token)
+	}
+
+	// 4. Ensure finalizer is present before any external mutations
+	if added, result, err := r.ensureFinalizer(ctx, &issue); added {
+		return result, err
+	}
+
+	// 5. Create or sync the remote issue
+	if issue.Status.IssueNumber == 0 {
+		if err := r.createRemoteIssue(ctx, &issue, token); err != nil {
+			return ctrl.Result{}, err
+		}
+	} else {
+		if result, err := r.syncRemoteIssue(ctx, &issue, token); err != nil {
+			return result, err
+		}
+	}
+
+	// 6. Periodic resync to detect and correct drift
+	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+}
+
+// ---------------------------------------------------------------------------
+// Helper methods — one per reconciliation phase
+// ---------------------------------------------------------------------------
+
+// getToken reads the GitHub API token from the Secret referenced by the CR.
+func (r *GitHubIssueReconciler) getToken(ctx context.Context, issue *issuesv1.GitHubIssue) (string, error) {
+	var secret corev1.Secret
+	key := types.NamespacedName{
+		Name:      issue.Spec.TokenSecretRef,
+		Namespace: issue.Namespace,
+	}
+	if err := r.Get(ctx, key, &secret); err != nil {
+		return "", fmt.Errorf("unable to fetch Secret %s: %w", key, err)
 	}
 	tokenBytes, exists := secret.Data["token"]
 	if !exists {
-		logger.Error(fmt.Errorf("token key not found in secret"), "invalid Secret data")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return "", fmt.Errorf("key \"token\" not found in Secret %s", key)
 	}
-	token := string(tokenBytes)
+	return string(tokenBytes), nil
+}
 
-	// 3. Handle deletion (check if CR is being deleted)
-	if !issue.DeletionTimestamp.IsZero() {
-		// CR is being deleted
-		if controllerutil.ContainsFinalizer(&issue, githubIssueFinalizer) {
-			// Finalizer exists, must cleanup first
+// handleDeletion closes the remote issue (if it exists) and removes the finalizer
+// so Kubernetes can complete the deletion.
+func (r *GitHubIssueReconciler) handleDeletion(ctx context.Context, issue *issuesv1.GitHubIssue, token string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
 
-			// Close the remote issue if it was created
-			if issue.Status.IssueNumber > 0 {
-				logger.Info("closing remote issue before deletion", "issueNumber", issue.Status.IssueNumber)
-				if err := r.IssueProvider.Close(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
-					logger.Error(err, "failed to close remote issue")
-					// Retry later - don't remove finalizer until cleanup succeeds
-					return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-				}
-			}
-
-			// Cleanup done, remove finalizer to allow deletion
-			controllerutil.RemoveFinalizer(&issue, githubIssueFinalizer)
-			if err := r.Update(ctx, &issue); err != nil {
-				logger.Error(err, "failed to remove finalizer")
-				return ctrl.Result{}, err
-			}
-			logger.Info("finalizer removed, CR can be deleted")
-		}
-		// Finalizer removed or never existed, let Kubernetes delete
+	if !controllerutil.ContainsFinalizer(issue, githubIssueFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
-	// 4. Add finalizer if not present
-	if !controllerutil.ContainsFinalizer(&issue, githubIssueFinalizer) {
-		controllerutil.AddFinalizer(&issue, githubIssueFinalizer)
-		if err := r.Update(ctx, &issue); err != nil {
-			logger.Error(err, "failed to add finalizer")
-			return ctrl.Result{}, err
+	// Close the remote issue if it was created
+	if issue.Status.IssueNumber > 0 {
+		logger.Info("closing remote issue before deletion", "issueNumber", issue.Status.IssueNumber)
+		if err := r.IssueProvider.Close(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
+			logger.Error(err, "failed to close remote issue")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-		// Requeue to re-fetch the updated object before proceeding.
-		// The Update call above changes the resourceVersion, so continuing
-		// with the stale local copy could cause conflict errors on subsequent writes.
-		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// 5. Create issue if status.IssueNumber == 0
-	if issue.Status.IssueNumber == 0 {
-		logger.Info("creating remote issue", "repo", issue.Spec.Repo, "title", issue.Spec.Title)
-		createdIssue, err := r.IssueProvider.Create(ctx, token, providers.CreateIssueInput{
-			Repo:   issue.Spec.Repo,
+	// Remove finalizer to unblock deletion
+	controllerutil.RemoveFinalizer(issue, githubIssueFinalizer)
+	if err := r.Update(ctx, issue); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to remove finalizer: %w", err)
+	}
+	logger.Info("finalizer removed, CR can be deleted")
+	return ctrl.Result{}, nil
+}
+
+// ensureFinalizer adds the cleanup finalizer if it is not already present.
+// Returns (true, result, err) when the finalizer was just added (caller should return immediately
+// to requeue and re-fetch the updated object).
+func (r *GitHubIssueReconciler) ensureFinalizer(ctx context.Context, issue *issuesv1.GitHubIssue) (bool, ctrl.Result, error) {
+	if controllerutil.ContainsFinalizer(issue, githubIssueFinalizer) {
+		return false, ctrl.Result{}, nil
+	}
+	controllerutil.AddFinalizer(issue, githubIssueFinalizer)
+	if err := r.Update(ctx, issue); err != nil {
+		return true, ctrl.Result{}, fmt.Errorf("failed to add finalizer: %w", err)
+	}
+	// Requeue to re-fetch the updated object (resourceVersion changed).
+	return true, ctrl.Result{Requeue: true}, nil
+}
+
+// createRemoteIssue creates a new GitHub issue and records its details in status.
+func (r *GitHubIssueReconciler) createRemoteIssue(ctx context.Context, issue *issuesv1.GitHubIssue, token string) error {
+	logger := log.FromContext(ctx)
+	logger.Info("creating remote issue", "repo", issue.Spec.Repo, "title", issue.Spec.Title)
+
+	created, err := r.IssueProvider.Create(ctx, token, providers.CreateIssueInput{
+		Repo:   issue.Spec.Repo,
+		Title:  issue.Spec.Title,
+		Body:   issue.Spec.Body,
+		Labels: issue.Spec.Labels,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create remote issue: %w", err)
+	}
+
+	issue.Status.IssueNumber = created.Number
+	issue.Status.IssueURL = created.URL
+	issue.Status.State = created.State
+	if err := r.Status().Update(ctx, issue); err != nil {
+		return fmt.Errorf("failed to update status after creation: %w", err)
+	}
+	logger.Info("remote issue created", "issueNumber", created.Number)
+	return nil
+}
+
+// syncRemoteIssue enforces the desired state (spec) onto the existing GitHub issue.
+// It reopens the issue if closed externally and pushes any title/body/labels drift.
+func (r *GitHubIssueReconciler) syncRemoteIssue(ctx context.Context, issue *issuesv1.GitHubIssue, token string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("syncing remote issue", "issueNumber", issue.Status.IssueNumber)
+
+	current, err := r.IssueProvider.Get(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get remote issue: %w", err)
+	}
+
+	// Reopen if someone closed it on GitHub
+	if current.State == "closed" {
+		logger.Info("reopening externally-closed issue", "issueNumber", issue.Status.IssueNumber)
+		if err := r.IssueProvider.Reopen(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
+			logger.Error(err, "failed to reopen remote issue")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		current.State = "open"
+	}
+
+	// Push spec to GitHub if title/body/labels have drifted
+	if r.specDrifted(issue, current) {
+		logger.Info("updating remote issue to match spec", "issueNumber", issue.Status.IssueNumber)
+		if _, err := r.IssueProvider.Update(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber, providers.UpdateIssueInput{
 			Title:  issue.Spec.Title,
 			Body:   issue.Spec.Body,
 			Labels: issue.Spec.Labels,
-		})
-		if err != nil {
-			logger.Error(err, "failed to create remote issue")
-			return ctrl.Result{}, err
+		}); err != nil {
+			logger.Error(err, "failed to update remote issue")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
-
-		// Update status with created issue details
-		issue.Status.IssueNumber = createdIssue.Number
-		issue.Status.IssueURL = createdIssue.URL
-		issue.Status.State = createdIssue.State
-		if err := r.Status().Update(ctx, &issue); err != nil {
-			logger.Error(err, "failed to update GitHubIssue status after creation")
-			return ctrl.Result{}, err
-		}
-		logger.Info("remote issue created successfully", "issueNumber", createdIssue.Number)
-	} else {
-		// 6. Sync: K8s spec is the source of truth — enforce desired state on GitHub
-		logger.Info("syncing remote issue", "issueNumber", issue.Status.IssueNumber)
-
-		// Get current state of the remote issue
-		currentIssue, err := r.IssueProvider.Get(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber)
-		if err != nil {
-			logger.Error(err, "failed to get remote issue for syncing")
-			return ctrl.Result{}, err
-		}
-
-		// Reopen the issue if someone closed it on GitHub — K8s says it should exist and be open
-		if currentIssue.State == "closed" {
-			logger.Info("remote issue was closed externally, reopening to match desired state", "issueNumber", issue.Status.IssueNumber)
-			if err := r.IssueProvider.Reopen(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber); err != nil {
-				logger.Error(err, "failed to reopen remote issue")
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			currentIssue.State = "open"
-		}
-
-		// Push spec to GitHub if title/body/labels have drifted
-		if currentIssue.Title != issue.Spec.Title || currentIssue.Body != issue.Spec.Body || !labelsMatch(currentIssue.Labels, issue.Spec.Labels) {
-			logger.Info("updating remote issue to match spec", "issueNumber", issue.Status.IssueNumber)
-			_, err := r.IssueProvider.Update(ctx, token, issue.Spec.Repo, issue.Status.IssueNumber, providers.UpdateIssueInput{
-				Title:  issue.Spec.Title,
-				Body:   issue.Spec.Body,
-				Labels: issue.Spec.Labels,
-			})
-			if err != nil {
-				logger.Error(err, "failed to update remote issue")
-				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-			}
-			logger.Info("remote issue updated successfully", "issueNumber", issue.Status.IssueNumber)
-		} else {
-			logger.Info("remote issue is already in sync with spec", "issueNumber", issue.Status.IssueNumber)
-		}
-
-		// Update status to reflect enforced state
-		if issue.Status.State != currentIssue.State {
-			issue.Status.State = currentIssue.State
-			if err := r.Status().Update(ctx, &issue); err != nil {
-				logger.Error(err, "failed to update GitHubIssue status after sync")
-				return ctrl.Result{}, err
-			}
-		}
+		logger.Info("remote issue updated")
 	}
 
-	// Requeue after 5 minutes to periodically detect and correct
-	// any drift on the remote GitHub issue (e.g., someone closed or edited it).
-	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	// Sync status back
+	if issue.Status.State != current.State {
+		issue.Status.State = current.State
+		if err := r.Status().Update(ctx, issue); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to update status after sync: %w", err)
+		}
+	}
+	return ctrl.Result{}, nil
+}
 
+// specDrifted reports whether the remote issue differs from the desired spec.
+func (r *GitHubIssueReconciler) specDrifted(issue *issuesv1.GitHubIssue, remote *providers.Issue) bool {
+	return remote.Title != issue.Spec.Title ||
+		remote.Body != issue.Spec.Body ||
+		!labelsMatch(remote.Labels, issue.Spec.Labels)
 }
 
 // labelsMatch checks if two label slices contain the same elements (order-independent)
